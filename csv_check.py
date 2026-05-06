@@ -9,3 +9,7 @@ sample = df.iloc[0]
 
 for i, value in enumerate(sample):
     print(f"[{i}번 칸] 컬럼명: {df.columns[i]} | 내용: {value}")
+print("\n--- ✅ 컬럼 매핑 점검 완료 ---")
+
+
+
