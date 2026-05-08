@@ -15,7 +15,7 @@
         <p class="text-secondary mb-4">BERT 기반의 지능형 게임 추천 시스템</p>
         <form action="{% url 'search' %}" method="get" class="w-50">
             <div class="input-group mb-3">
-                <input type="text" name="q" class="form-control form-control-lg" placeholder="좋아하는 게임 이름을 입력하세요 (예: Portal 2)">
+                <input type="text" name="q" class="form-control form-control-lg" placeholder="좋아하는 게임 이름을 입력하세요 ">
                 <button class="btn btn-primary px-4" type="submit">추천받기</button>
             </div>
             {% if error %}
