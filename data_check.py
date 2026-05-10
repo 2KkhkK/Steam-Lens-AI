@@ -17,24 +17,24 @@ else:
         content = f.read().decode('utf-8', errors='ignore')
 
     # 3. 판다스로 변환 (칸 수가 안 맞는 줄은 skip)
-    # 
     df = pd.read_csv(io.StringIO(content), on_bad_lines='skip', low_memory=False)
     print(f"🧐 총 {len(df)}개의 행을 성공적으로 불러왔습니다.")
 
     # 4. 우리가 필요한 컬럼만 추출 (이미 분석한 번호 기반)
-    # 컬럼명이 다를 수 있으니 인덱스(번호)로 접근하는 게 가장 안전합니다.
     try:
         clean_df = pd.DataFrame()
         clean_df['Name'] = df.iloc[:, 1]               # name
         clean_df['About_the_game'] = df.iloc[:, 7]    # about_the_game
         clean_df['Price'] = df.iloc[:, 4]              # price
         clean_df['Metacritic_score'] = df.iloc[:, 17] # metacritic_score
-        clean_df['Genres'] = df.iloc[:, 28]            # genres
+        
+        # [핵심 수정 부분] Genres와 함께 Tags 컬럼을 추가합니다.
+        clean_df['Genres'] = df.iloc[:, 28]            # genres (장르)
+        clean_df['Tags'] = df.iloc[:, 42]              # tags (태그)
+        
         clean_df['Image_URL'] = df.iloc[:, 10]         # header_image
 
         # 5. 데이터 '진짜' 정제 (필터링)
-        # - 설명(About_the_game)이 비어있으면 AI 학습 불가 -> 삭제
-        # - 메타크리틱 점수가 숫자가 아닌 것들(True, False 등) -> 0으로 처리
         print("🧹 데이터 필터링 및 타입 교정 중...")
         
         clean_df = clean_df.dropna(subset=['Name', 'About_the_game'])
@@ -44,13 +44,15 @@ else:
         clean_df.to_csv(output_file, index=False, encoding='utf-8-sig')
         
         print("-" * 30)
-        print(f"✅ 수술 성공! 깨끗한 데이터가 생성되었습니다.")
+        print(f"✅ 수술 성공! 'Tags'와 'Genres'가 포함된 완벽한 데이터가 생성되었습니다.")
         print(f"💾 저장된 파일명: {output_file}")
         print(f"📊 최종 데이터 개수: {len(clean_df)}개")
         print("-" * 30)
-        print("💡 상위 5개 데이터 미리보기:")
-        print(clean_df[['Name', 'Metacritic_score']].head())
+        print("💡 상위 5개 데이터 미리보기 (장르 및 태그 확인):")
+        print(clean_df[['Name', 'Genres', 'Tags']].head())
 
+    except IndexError as e:
+        print(f"❌ 컬럼 번호(Index) 에러 발생: {e}")
+        print("💡 팁: 'Tags'가 29번이 아닐 수 있습니다. 터미널에서 'print(list(enumerate(df.columns)))'를 실행하여 정확한 번호를 찾아보세요.")
     except Exception as e:
         print(f"❌ 데이터 추출 중 에러 발생: {e}")
-        print("팁: df.columns를 찍어서 컬럼 개수가 맞는지 확인해 보세요.")
