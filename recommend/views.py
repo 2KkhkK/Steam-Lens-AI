@@ -5,7 +5,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 import os
 import re
 import requests
-
+import numpy as np
+from django.shortcuts import render, redirect
 # 1. 데이터 및 모델 로드 (서버 실행 시 1회 로드)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSV_PATH = os.path.join(BASE_DIR, 'cleaned_games.csv')
@@ -201,3 +202,154 @@ def search(request):
         return render(request, 'recommend/index.html', {'error': "서버 처리 중 오류가 발생했습니다."})
 
     return render(request, 'recommend/results.html', {'results': results, 'query': query})
+
+# 💡 View 3: 로그인 유저 맞춤형 대시보드
+def dashboard(request):
+    if not request.user.is_authenticated:
+        return redirect('/')
+
+    # allauth를 통해 스팀 계정 정보 가져오기
+    from allauth.socialaccount.models import SocialAccount
+    try:
+        steam_account = SocialAccount.objects.get(user=request.user, provider='steam')
+        steam_id = steam_account.uid
+    except SocialAccount.DoesNotExist:
+        return render(request, 'recommend/dashboard.html', {'error': '스팀 계정이 연동되지 않았습니다.'})
+
+    STEAM_API_KEY = os.environ.get('STEAM_API_KEY', '85D83C9F15D86AE77598F640BECE4827')
+    owned_games_url = f"https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={steam_id}&include_appinfo=1"
+
+    try:
+        resp = requests.get(owned_games_url, timeout=5).json()
+        games = resp.get('response', {}).get('games', [])
+    except Exception as e:
+        return render(request, 'recommend/dashboard.html', {'error': '스팀 라이브러리를 불러오는데 실패했습니다.'})
+
+    if not games:
+        return render(request, 'recommend/dashboard.html', {'error': '보유한 게임이 없거나 프로필이 비공개입니다.'})
+
+    # 플레이 시간 기준으로 정렬
+    games.sort(key=lambda x: x.get('playtime_forever', 0), reverse=True)
+    
+    # 상위 10개 추출
+    top_games = games[:10]
+    top_appids = [str(g['appid']) for g in top_games]
+    owned_appids = set([str(g['appid']) for g in games])
+
+    if 'App_ID' not in df.columns:
+        df['App_ID'] = df['Image_URL'].str.extract(r'/apps/(\d+)/')[0]
+
+    user_vectors = []
+    
+    for app_id in top_appids:
+        matched = df[df['App_ID'] == app_id]
+        if not matched.empty:
+            idx = matched.index[0]
+            user_vectors.append(embeddings[idx])
+
+    if not user_vectors:
+        return render(request, 'recommend/dashboard.html', {'error': '보유한 게임 중 추천 시스템에 등록된 게임이 없습니다.'})
+
+    # 유저 프로필 벡터 생성 (보유한 상위 10개 게임 벡터의 평균)
+    user_profile_vector = np.mean(user_vectors, axis=0).reshape(1, -1)
+
+    # 코사인 유사도 계산
+    sim_scores = cosine_similarity(user_profile_vector, embeddings).flatten()
+
+    # 이미 보유한 게임은 추천에서 제외하기 위해 인덱스 수집
+    owned_indices = set(df[df['App_ID'].isin(owned_appids)].index)
+
+    top_indices = sim_scores.argsort()[-1000:][::-1]
+    
+    candidates = []
+    for i in top_indices:
+        if i in owned_indices:
+            continue
+        bert_score = sim_scores[i]
+        candidates.append({'idx': i, 'final_score': bert_score})
+        
+    candidates.sort(key=lambda x: x['final_score'], reverse=True)
+
+    results = []
+    # 상위 6개 결과 추출 (search 로직과 유사)
+    for item in candidates[:6]:
+        i = item['idx']
+        image_url = df.iloc[i].get('Image_URL', '')
+        
+        display_price = f"${df.iloc[i].get('Price', 0)}"
+        original_price = ""
+        discount_percent = 0
+        is_discounted = False
+        historical_low = ""
+
+        # Steam API 호출
+        app_id_match = re.search(r'/apps/(\d+)/', str(image_url))
+        if app_id_match:
+            app_id = app_id_match.group(1)
+            try:
+                api_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=kr&filters=price_overview"
+                resp = requests.get(api_url, timeout=2).json()
+                if resp and isinstance(resp, dict) and resp.get(app_id, {}).get('success'):
+                    app_data = resp[app_id].get('data')
+                    if isinstance(app_data, dict):
+                        p_info = app_data.get('price_overview')
+                        if isinstance(p_info, dict):
+                            display_price = p_info.get('final_formatted', 'Free')
+                            discount_percent = p_info.get('discount_percent', 0)
+                            if discount_percent > 0:
+                                is_discounted = True
+                                original_price = p_info.get('initial_formatted', '')
+                        else:
+                            display_price = "Free to Play"
+                    else:
+                        display_price = "Free to Play"
+            except Exception as e:
+                pass
+
+        # ITAD API
+        ITAD_API_KEY = "3ed9b6dbd9f23acbab9868b306f36184f8bf2c71"
+        try:
+            game_name = df.iloc[i]['Name']
+            search_url = "https://api.isthereanydeal.com/games/search/v1"
+            search_params = {"key": ITAD_API_KEY, "title": game_name}
+            search_resp = requests.get(search_url, params=search_params, timeout=3).json()
+            
+            if isinstance(search_resp, list) and len(search_resp) > 0:
+                game_id = search_resp[0].get('id')
+                info_url = "https://api.isthereanydeal.com/games/info/v2"
+                info_params = {"key": ITAD_API_KEY, "id": game_id}
+                info_resp = requests.get(info_url, params=info_params, timeout=3).json()
+                
+                target_data = {}
+                if isinstance(info_resp, dict):
+                    if game_id in info_resp:
+                        target_data = info_resp[game_id]
+                    else:
+                        target_data = info_resp
+                elif isinstance(info_resp, list) and len(info_resp) > 0:
+                    target_data = info_resp[0]
+                    
+                if target_data and target_data.get('historyLow'):
+                    lowest_price = target_data['historyLow'].get('amount', 0)
+                    currency = target_data['historyLow'].get('currency', 'USD')
+                    if currency == "KRW":
+                        historical_low = f"₩ {int(lowest_price):,}"
+                    else:
+                        historical_low = f"{currency} {lowest_price}"
+        except Exception as e:
+            pass
+
+        results.append({
+            'name': df.iloc[i]['Name'],
+            'about': df.iloc[i].get('About_the_game', '설명 없음')[:120],
+            'score': int(df.iloc[i].get('Metacritic_score', 0)),
+            'image': image_url,
+            'similarity': round(item['final_score'], 2),
+            'price': display_price,
+            'original_price': original_price,
+            'discount_percent': discount_percent,
+            'is_discounted': is_discounted,
+            'historical_low': historical_low
+        })
+
+    return render(request, 'recommend/dashboard.html', {'results': results})
