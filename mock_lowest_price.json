@@ -1,0 +1,12 @@
+{
+    "Elden Ring": {"currency": "KRW", "amount": 45000},
+    "Cyberpunk 2077": {"currency": "KRW", "amount": 33000},
+    "Grand Theft Auto V": {"currency": "KRW", "amount": 16500},
+    "Stardew Valley": {"currency": "KRW", "amount": 8000},
+    "Hades": {"currency": "KRW", "amount": 13000},
+    "Red Dead Redemption 2": {"currency": "KRW", "amount": 22000},
+    "Portal 2": {"currency": "KRW", "amount": 1050},
+    "Terraria": {"currency": "KRW", "amount": 5250},
+    "The Witcher 3: Wild Hunt": {"currency": "KRW", "amount": 6960},
+    "Monster Hunter: World": {"currency": "KRW", "amount": 11500}
+}
