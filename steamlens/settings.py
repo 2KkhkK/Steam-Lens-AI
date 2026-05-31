@@ -10,10 +10,16 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import os
 from pathlib import Path
+# pyrefly: ignore [missing-import]
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables from .env file
+load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 
 # Quick-start development settings - unsuitable for production
@@ -134,8 +140,7 @@ SITE_ID = 1
 LOGIN_REDIRECT_URL = '/dashboard/'
 LOGOUT_REDIRECT_URL = '/'
 
-import os
-STEAM_API_KEY = os.environ.get('STEAM_API_KEY', 'YOUR_STEAM_API_KEY_HERE')
+STEAM_API_KEY = os.environ.get('STEAM_API_KEY')
 
 SOCIALACCOUNT_PROVIDERS = {
     'steam': {
