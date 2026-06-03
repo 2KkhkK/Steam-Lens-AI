@@ -3,6 +3,7 @@ import requests
 import json
 import re
 from django.conf import settings
+from django.core.cache import cache
 
 # mock_lowest_price.json 로드 로직
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,6 +47,12 @@ def get_steam_price_info(image_url):
         return display_price, original_price, discount_percent, is_discounted
         
     app_id = app_id_match.group(1)
+    
+    cache_key = f"steam_price_{app_id}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        return cached_data
+
     api_url = f"https://store.steampowered.com/api/appdetails?appids={app_id}&cc=kr&filters=price_overview"
     
     try:
@@ -69,6 +76,7 @@ def get_steam_price_info(image_url):
         print(f"⚠️ Steam API Error ({app_id}): {e}")
         # 오류 시 기본값 유지
 
+    cache.set(cache_key, (display_price, original_price, discount_percent, is_discounted), 3600) # 1 hour cache
     return display_price, original_price, discount_percent, is_discounted
 
 def get_historical_low(game_name):
@@ -77,6 +85,11 @@ def get_historical_low(game_name):
     실패 시 로컬의 mock_lowest_price.json 데이터를 사용하여 반환합니다.
     """
     ITAD_API_KEY = "3ed9b6dbd9f23acbab9868b306f36184f8bf2c71"
+    
+    cache_key = f"itad_price_{game_name}"
+    cached_data = cache.get(cache_key)
+    if cached_data:
+        return cached_data
     
     try:
         search_url = "https://api.isthereanydeal.com/games/search/v1"
@@ -102,9 +115,11 @@ def get_historical_low(game_name):
                 lowest_price = target_data['historyLow'].get('amount', 0)
                 currency = target_data['historyLow'].get('currency', 'USD')
                 if currency == "KRW":
-                    return f"₩ {int(lowest_price):,}"
+                    res = f"₩ {int(lowest_price):,}"
                 else:
-                    return f"{currency} {lowest_price}"
+                    res = f"{currency} {lowest_price}"
+                cache.set(cache_key, res, 86400) # 24 hours cache
+                return res
     except Exception as e:
         print(f"⚠️ ITAD API Error ({game_name}): {e}. Mock 데이터로 대체 시도합니다.")
 
@@ -114,8 +129,11 @@ def get_historical_low(game_name):
             currency = data.get('currency', 'USD')
             amount = data.get('amount', 0)
             if currency == "KRW":
-                return f"₩ {int(amount):,}"
+                res = f"₩ {int(amount):,}"
             else:
-                return f"{currency} {amount}"
+                res = f"{currency} {amount}"
+            cache.set(cache_key, res, 86400) # 24 hours cache
+            return res
                 
+    cache.set(cache_key, "", 86400)
     return ""

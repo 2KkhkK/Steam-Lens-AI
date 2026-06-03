@@ -151,3 +151,11 @@ SOCIALACCOUNT_PROVIDERS = {
         }
     }
 }
+
+# Caching Configuration
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+        'LOCATION': 'steamlens-cache',
+    }
+}
