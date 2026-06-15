@@ -1,0 +1,8 @@
+Django
+django-allauth
+pandas
+numpy
+scikit-learn
+sentence-transformers
+requests
+deep-translator
