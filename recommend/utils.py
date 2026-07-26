@@ -21,7 +21,7 @@ def get_user_owned_games(steam_id):
     """
     주어진 steam_id(SteamID64)를 기반으로 해당 유저가 보유한 게임 리스트(플레이 시간 포함)를 반환합니다.
     """
-    STEAM_API_KEY = getattr(settings, 'STEAM_API_KEY', os.environ.get('STEAM_API_KEY', '85D83C9F15D86AE77598F640BECE4827'))
+    STEAM_API_KEY = getattr(settings, 'STEAM_API_KEY', os.environ.get('STEAM_API_KEY', 'your_steam_key')) # 실제 Steam API 키로 교체 필요
     owned_games_url = f"https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={STEAM_API_KEY}&steamid={steam_id}&include_appinfo=1"
     
     try:
@@ -84,7 +84,7 @@ def get_historical_low(game_name):
     ITAD API를 호출하여 역대 최저가 정보를 반환합니다.
     실패 시 로컬의 mock_lowest_price.json 데이터를 사용하여 반환합니다.
     """
-    ITAD_API_KEY = "3ed9b6dbd9f23acbab9868b306f36184f8bf2c71"
+    ITAD_API_KEY = "your_itad_key"  # 실제 ITAD API 키로 교체 필요
     
     cache_key = f"itad_price_{game_name}"
     cached_data = cache.get(cache_key)
