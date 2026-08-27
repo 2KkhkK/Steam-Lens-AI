@@ -1,8 +1,27 @@
-Django
-django-allauth
-pandas
-numpy
-scikit-learn
-sentence-transformers
-requests
-deep-translator
+# 버전을 고정한다. 예전에는 이름만 적혀 있어서 설치 시점에 따라
+# 전혀 다른 버전이 깔렸고, 몇 달 뒤 클론하면 그대로 깨졌다.
+# ~= 는 "이 버전 이상, 다음 마이너 버전 미만"을 뜻한다.
+
+# --- 웹 프레임워크 -------------------------------------------------------------
+Django~=5.2.6
+django-allauth~=65.17.0
+# settings.py가 .env를 읽는 데 필요하다.
+# 예전에는 이 줄이 빠져 있어서, 클론 후 첫 runserver가
+# ModuleNotFoundError: No module named 'dotenv' 로 실패했다.
+python-dotenv~=1.2.0
+
+# --- 데이터 처리 ---------------------------------------------------------------
+pandas~=3.0.0
+numpy~=2.2.0
+
+# --- 임베딩 (오프라인 스크립트 embed.py 에서 사용) ------------------------------
+sentence-transformers~=3.3
+
+# --- 외부 API / 번역 -----------------------------------------------------------
+requests~=2.34.0
+# 선택 의존성: 없어도 서비스는 동작하며 설명문이 영어 원문으로 표시된다.
+deep-translator~=1.11
+
+# scikit-learn은 더 이상 필요하지 않다.
+# cosine_similarity() 대신 임베딩을 미리 L2 정규화해 두고
+# numpy 내적(embeddings @ query)으로 직접 계산하도록 바꿨다.

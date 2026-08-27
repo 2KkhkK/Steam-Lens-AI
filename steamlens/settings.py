@@ -11,7 +11,10 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
 import os
+import secrets
+import warnings
 from pathlib import Path
+
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
@@ -22,16 +25,55 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(os.path.join(BASE_DIR, '.env'))
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
+def env_bool(name, default=False):
+    """환경변수를 불리언으로 읽는다. '1', 'true', 'yes', 'on'을 참으로 본다."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ('1', 'true', 'yes', 'on')
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-+i!b5_3au__a(df0i=&ad(!b8e@ynu1bhp#=65t8-4^y@)!7yv'
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+def env_list(name, default):
+    raw = os.environ.get(name)
+    if not raw:
+        return list(default)
+    return [item.strip() for item in raw.split(',') if item.strip()]
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+
+# See https://docs.djangoproject.com/en/stable/howto/deployment/checklist/
+
+# SECURITY: 비밀키는 절대 소스에 두지 않는다.
+# 예전에는 'django-insecure-...' 기본값이 그대로 커밋되어 깃 히스토리에 남아 있었다.
+# 환경변수가 없으면 프로세스마다 임시 키를 만들어 로컬 실행은 되게 하되,
+# 세션이 재시작마다 초기화된다는 점을 경고로 알린다.
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
+
+# SECURITY: 기본값을 False로 둔다. 배포 시 실수로 켜두는 사고를 막는다.
+DEBUG = env_bool('DJANGO_DEBUG', False)
+
+if not SECRET_KEY:
+    if DEBUG or env_bool('DJANGO_ALLOW_EPHEMERAL_SECRET', True):
+        SECRET_KEY = secrets.token_urlsafe(50)
+        warnings.warn(
+            'DJANGO_SECRET_KEY가 설정되지 않아 임시 키를 생성했습니다. '
+            '서버를 재시작하면 로그인 세션이 모두 풀립니다. '
+            '.env.example을 .env로 복사한 뒤 값을 채워 주세요.',
+            RuntimeWarning,
+        )
+    else:
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured('운영 환경에서는 DJANGO_SECRET_KEY가 반드시 필요합니다.')
+
+ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', ['localhost', '127.0.0.1'])
+
+# DEBUG=False로 운영할 때만 켜지는 보안 헤더들.
+# 로컬 개발(http)에서 켜면 접속이 막히므로 조건부로 둔다.
+if not DEBUG and env_bool('DJANGO_SECURE_SSL', False):
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
 
 
 # Application definition
@@ -140,7 +182,13 @@ SITE_ID = 1
 LOGIN_REDIRECT_URL = '/dashboard/'
 LOGOUT_REDIRECT_URL = '/'
 
-STEAM_API_KEY = os.environ.get('STEAM_API_KEY')
+# -----------------------------------------------------------------------------
+# 외부 API 키 (전부 환경변수로 관리한다)
+# -----------------------------------------------------------------------------
+# 예전에는 utils.py 안에 ITAD 키가 문자열로 박혀 있어서 Steam 키와 관리 방식이
+# 달랐다. 이제 두 키 모두 여기서 한 번에 읽는다.
+STEAM_API_KEY = os.environ.get('STEAM_API_KEY', '')
+ITAD_API_KEY = os.environ.get('ITAD_API_KEY', '')
 
 SOCIALACCOUNT_PROVIDERS = {
     'steam': {
@@ -152,10 +200,82 @@ SOCIALACCOUNT_PROVIDERS = {
     }
 }
 
-# Caching Configuration
-CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'steamlens-cache',
+# -----------------------------------------------------------------------------
+# 캐시
+# -----------------------------------------------------------------------------
+# LocMemCache는 '프로세스 로컬'이라 gunicorn 워커가 여러 개면 워커마다 캐시가
+# 따로 논다. REDIS_URL을 주면 워커 전체가 캐시를 공유한다.
+REDIS_URL = os.environ.get('REDIS_URL', '')
+
+if REDIS_URL:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+        }
     }
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'steamlens-cache',
+            # 기본 300개는 게임 수천 건을 캐싱하기에 너무 작아 금방 밀려난다.
+            'OPTIONS': {'MAX_ENTRIES': 10000},
+        }
+    }
+
+# -----------------------------------------------------------------------------
+# 추천 엔진 튜닝 파라미터
+# -----------------------------------------------------------------------------
+# 예전에는 3.0 / 5.0 / 2.0 같은 숫자가 services.py 안에 흩어져 있어서
+# 실험할 때마다 코드를 고쳐야 했다. 한곳에 모아 두면 bulk_evaluate.py의
+# 그리드 서치 결과를 그대로 옮겨 적을 수 있다.
+RECOMMENDER = {
+    'MODEL_NAME': os.environ.get('EMBEDDING_MODEL', 'all-MiniLM-L6-v2'),
+    'CANDIDATE_POOL': int(os.environ.get('CANDIDATE_POOL', 1000)),  # 리랭킹 후보 수
+    'TOP_N': int(os.environ.get('TOP_N', 6)),                       # 화면에 보여줄 개수
+    'SEARCH_TAG_WEIGHT': float(os.environ.get('SEARCH_TAG_WEIGHT', 3.0)),
+    'DASHBOARD_TAG_WEIGHT': float(os.environ.get('DASHBOARD_TAG_WEIGHT', 5.0)),
+    'DASHBOARD_META_WEIGHT': float(os.environ.get('DASHBOARD_META_WEIGHT', 2.0)),
+    'WEIGHTED_TAGS': env_bool('WEIGHTED_TAGS', True),   # 태그 투표수 반영 여부
+    'PROFILE_GAMES': int(os.environ.get('PROFILE_GAMES', 10)),      # 프로필 벡터에 쓸 게임 수
+    'ENRICH_WORKERS': int(os.environ.get('ENRICH_WORKERS', 6)),     # 외부 API 병렬 호출 수
+    'TRANSLATE': env_bool('TRANSLATE', True),
 }
+
+# -----------------------------------------------------------------------------
+# 로깅
+# -----------------------------------------------------------------------------
+# 예전에는 모든 진단 출력이 print()였다. 배포하면 어디에도 남지 않고
+# 레벨별 필터링도 불가능했다.
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').upper()
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'standard': {
+            'format': '[{asctime}] {levelname:<8} {name}: {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'WARNING',
+    },
+    'loggers': {
+        'recommend': {
+            'handlers': ['console'],
+            'level': LOG_LEVEL,
+            'propagate': False,
+        },
+    },
+}
+
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
