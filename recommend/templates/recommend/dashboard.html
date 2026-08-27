@@ -33,6 +33,9 @@
                 </form>
             </div>
         </div>
+        {% if owned_count %}
+        <p class="text-secondary">보유 게임 {{ owned_count }}개 중 플레이 시간 상위 게임으로 취향 벡터를 만들었습니다.</p>
+        {% endif %}
         <hr class="border-secondary mb-5">
 
         {% if error %}
@@ -44,17 +47,25 @@
             {% for game in results %}
             <div class="col-md-4 mb-4">
                 <div class="card bg-secondary text-white h-100 shadow-lg border-0">
-                    <img src="{{ game.image }}" class="card-img-top" alt="{{ game.name }}">
+                    {% url 'track_click' as click_url %}
+                    <a href="{{ click_url }}?app_id={{ game.app_id }}&amp;rank={{ game.rank }}&amp;name={{ game.name|urlencode }}&amp;source=dashboard"
+                       target="_blank" rel="noopener">
+                        <img src="{{ game.image }}" class="card-img-top" alt="{{ game.name }}">
+                    </a>
                     
                     <div class="card-body d-flex flex-column">
-                        <h5 class="card-title text-truncate fw-bold" title="{{ game.name }}">{{ game.name }}</h5>
+                        <h5 class="card-title text-truncate fw-bold" title="{{ game.name }}">
+                            <a class="text-white text-decoration-none"
+                               href="{{ click_url }}?app_id={{ game.app_id }}&amp;rank={{ game.rank }}&amp;name={{ game.name|urlencode }}&amp;source=dashboard"
+                               target="_blank" rel="noopener">{{ game.name }}</a>
+                        </h5>
                         
                         <p class="card-text text-light mb-2" style="font-size: 0.9rem;">
-                            <small>AI 취향 일치도: <span class="fw-bold">{{ game.similarity }}점</span></small>
+                            <small>AI 취향 일치도: <span class="fw-bold">{{ game.match_percent }}%</span></small>
                         </p>
                         
                         <p class="card-text text-light opacity-75 mb-4" style="font-size: 0.85rem;">
-                            {{ game.about }}...
+                            {{ game.about }}
                         </p>
 
                         <div class="mt-auto d-flex justify-content-between align-items-center">
