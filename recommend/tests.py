@@ -518,3 +518,55 @@ class ViewTests(FakeCatalogMixin, TestCase):
         })
         self.assertEqual(response.status_code, 302)
         self.assertNotIn('evil.example.com', response['Location'])
+
+
+# =============================================================================
+# 보안 강화 — 비밀키
+# =============================================================================
+from django.core.exceptions import ImproperlyConfigured
+
+from steamlens import settings as project_settings
+
+
+class SecretKeyResolutionTests(SimpleTestCase):
+    """settings.resolve_secret_key 규칙.
+
+    이전 버전은 임시 키 허용 기본값이 True라 운영에서 키를 빠뜨려도 부팅됐다.
+    """
+
+    STRONG = 'x' * 60
+
+    def test_uses_given_key(self):
+        key, ephemeral = project_settings.resolve_secret_key(
+            self.STRONG, debug=False, allow_ephemeral=False)
+        self.assertEqual(key, self.STRONG)
+        self.assertFalse(ephemeral)
+
+    def test_production_without_key_refuses_to_boot(self):
+        with self.assertRaises(ImproperlyConfigured):
+            project_settings.resolve_secret_key(None, debug=False, allow_ephemeral=False)
+
+    def test_debug_without_key_gets_ephemeral(self):
+        key, ephemeral = project_settings.resolve_secret_key(
+            None, debug=True, allow_ephemeral=False)
+        self.assertTrue(ephemeral)
+        self.assertGreaterEqual(len(key), 50)
+
+    def test_ephemeral_keys_differ(self):
+        a, _ = project_settings.resolve_secret_key(None, debug=True, allow_ephemeral=False)
+        b, _ = project_settings.resolve_secret_key(None, debug=True, allow_ephemeral=False)
+        self.assertNotEqual(a, b)
+
+    def test_production_rejects_short_key(self):
+        with self.assertRaises(ImproperlyConfigured):
+            project_settings.resolve_secret_key('short', debug=False, allow_ephemeral=False)
+
+    def test_production_rejects_django_insecure_prefix(self):
+        """이 저장소의 예전 키도 이 형태로 공개 히스토리에 남아 있다."""
+        with self.assertRaises(ImproperlyConfigured):
+            project_settings.resolve_secret_key(
+                'django-insecure-' + 'a' * 60, debug=False, allow_ephemeral=False)
+
+    def test_debug_accepts_weak_key(self):
+        key, _ = project_settings.resolve_secret_key('short', debug=True, allow_ephemeral=False)
+        self.assertEqual(key, 'short')
