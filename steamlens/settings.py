@@ -12,9 +12,11 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 import os
 import secrets
+import sys
 import warnings
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
 # pyrefly: ignore [missing-import]
 from dotenv import load_dotenv
 
@@ -42,38 +44,110 @@ def env_list(name, default):
 
 # See https://docs.djangoproject.com/en/stable/howto/deployment/checklist/
 
-# SECURITY: 비밀키는 절대 소스에 두지 않는다.
-# 예전에는 'django-insecure-...' 기본값이 그대로 커밋되어 깃 히스토리에 남아 있었다.
-# 환경변수가 없으면 프로세스마다 임시 키를 만들어 로컬 실행은 되게 하되,
-# 세션이 재시작마다 초기화된다는 점을 경고로 알린다.
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
+# `python manage.py test` 실행 여부. 테스트는 .env 없이도 돌아야 하므로
+# 비밀키/HTTPS 관련 기본값을 테스트에서만 완화한다.
+RUNNING_TESTS = len(sys.argv) > 1 and sys.argv[1] == 'test'
 
-# SECURITY: 기본값을 False로 둔다. 배포 시 실수로 켜두는 사고를 막는다.
+# SECURITY: 기본값 False. 배포 시 실수로 켜두는 사고를 막는다.
 DEBUG = env_bool('DJANGO_DEBUG', False)
 
-if not SECRET_KEY:
-    if DEBUG or env_bool('DJANGO_ALLOW_EPHEMERAL_SECRET', True):
-        SECRET_KEY = secrets.token_urlsafe(50)
-        warnings.warn(
-            'DJANGO_SECRET_KEY가 설정되지 않아 임시 키를 생성했습니다. '
-            '서버를 재시작하면 로그인 세션이 모두 풀립니다. '
-            '.env.example을 .env로 복사한 뒤 값을 채워 주세요.',
-            RuntimeWarning,
-        )
-    else:
-        from django.core.exceptions import ImproperlyConfigured
-        raise ImproperlyConfigured('운영 환경에서는 DJANGO_SECRET_KEY가 반드시 필요합니다.')
+
+def resolve_secret_key(raw, *, debug, allow_ephemeral):
+    """SECRET_KEY를 결정한다. 반환: (키, 임시 생성 여부)
+
+    이전 버전의 결함: 임시 키 허용 플래그의 기본값이 True여서, DEBUG=False
+    (운영)에서 키를 빠뜨려도 조용히 임시 키로 부팅했다. "운영에서는 키가
+    반드시 필요하다"는 분기가 사실상 죽은 코드였다. 그 결과 워커마다 키가
+    달라 세션/CSRF가 서로 맞지 않고, 재시작마다 전원이 로그아웃됐다.
+
+    지금 규칙
+      - 키가 있으면 그대로 쓴다. 단 운영(DEBUG=False)에서는 약한 키를 거부한다.
+      - 키가 없으면 DEBUG=True(로컬 개발)이거나 명시적으로 허용한 경우에만
+        임시 키를 만든다. 그 외에는 부팅을 거부한다.
+    """
+    if raw:
+        if not debug and (len(raw) < 50 or raw.startswith('django-insecure-')):
+            # Django 자체 점검(security.W009)과 같은 기준. 'django-insecure-'는
+            # startproject가 만든 개발용 키이며, 이 저장소의 예전 키도 그 형태로
+            # 공개 히스토리에 남아 있다.
+            raise ImproperlyConfigured(
+                'DJANGO_SECRET_KEY가 너무 약합니다(50자 미만이거나 django-insecure- 접두사). '
+                'python -c "import secrets; print(secrets.token_urlsafe(50))" 로 새로 발급하세요.'
+            )
+        return raw, False
+
+    if debug or allow_ephemeral:
+        return secrets.token_urlsafe(50), True
+
+    raise ImproperlyConfigured(
+        'DJANGO_SECRET_KEY가 설정되지 않았습니다. 로컬 개발이라면 .env.example을 .env로 '
+        '복사하세요(DJANGO_DEBUG=True 포함). 운영이라면 반드시 실제 키를 지정해야 합니다.'
+    )
+
+
+SECRET_KEY, _SECRET_IS_EPHEMERAL = resolve_secret_key(
+    os.environ.get('DJANGO_SECRET_KEY'),
+    debug=DEBUG,
+    # 기본값을 True -> '테스트 실행 중일 때만'으로 바꿨다.
+    allow_ephemeral=env_bool('DJANGO_ALLOW_EPHEMERAL_SECRET', RUNNING_TESTS),
+)
+
+if _SECRET_IS_EPHEMERAL and not RUNNING_TESTS:
+    warnings.warn(
+        'DJANGO_SECRET_KEY가 없어 임시 키를 생성했습니다(DEBUG 모드 전용). '
+        '서버를 재시작하면 로그인 세션이 모두 풀립니다.',
+        RuntimeWarning,
+    )
 
 ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', ['localhost', '127.0.0.1'])
 
-# DEBUG=False로 운영할 때만 켜지는 보안 헤더들.
-# 로컬 개발(http)에서 켜면 접속이 막히므로 조건부로 둔다.
-if not DEBUG and env_bool('DJANGO_SECURE_SSL', False):
+# -----------------------------------------------------------------------------
+# HTTPS / 쿠키 / 보안 헤더
+# -----------------------------------------------------------------------------
+# 이전 버전은 DJANGO_SECURE_SSL=True를 '직접 켜야' 보안 쿠키와 HSTS가 활성화됐다.
+# DEBUG=False로 배포하면서 이 플래그를 잊으면 세션 쿠키가 평문 HTTP로 나갔다.
+# 이제 운영(DEBUG=False)에서는 기본으로 켜지고, 필요할 때만 끈다.
+SECURE_SSL = env_bool('DJANGO_SECURE_SSL', not DEBUG and not RUNNING_TESTS)
+
+if SECURE_SSL:
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
-    SECURE_HSTS_SECONDS = 31536000
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    # HSTS는 한 번 브라우저에 저장되면 되돌리기 어렵다. 처음 배포할 때는 짧게
+    # (기본 1시간) 시작해 HTTPS가 정상인지 확인한 뒤 늘리는 것이 Django 권장 절차다.
+    SECURE_HSTS_SECONDS = int(os.environ.get('DJANGO_HSTS_SECONDS', 3600))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool('DJANGO_HSTS_INCLUDE_SUBDOMAINS', True)
+    SECURE_HSTS_PRELOAD = env_bool('DJANGO_HSTS_PRELOAD', False)
+
+# 리버스 프록시(nginx, 로드밸런서) 뒤에서 TLS를 종료할 때 켠다.
+# 이 설정이 없으면 Django는 모든 요청을 http로 보고 SSL 리다이렉트가 무한 반복된다.
+# 반대로 프록시가 없는데 켜면 클라이언트가 헤더를 위조할 수 있으므로 기본은 꺼 둔다.
+BEHIND_PROXY = env_bool('DJANGO_BEHIND_PROXY', False)
+if BEHIND_PROXY:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# 프록시/별도 도메인에서 POST(로그인 등)를 받으려면 필요하다. 예: https://example.com
+CSRF_TRUSTED_ORIGINS = env_list('DJANGO_CSRF_TRUSTED_ORIGINS', [])
+
+# 아래는 Django 기본값과 같지만, 의도를 코드에 남기기 위해 명시한다.
+SESSION_COOKIE_HTTPONLY = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+X_FRAME_OPTIONS = 'DENY'
+
+# -----------------------------------------------------------------------------
+# 관리자 페이지
+# -----------------------------------------------------------------------------
+# 기본 경로 'admin/'은 자동화된 스캐너가 가장 먼저 두드리는 주소다. 경로 변경은
+# 그 자체로 보안 장치가 아니며(공개 저장소의 기본값은 누구나 안다) 소음을 줄이는
+# 수단이다. 실제 방어는 아래 RATE_LIMITS의 로그인 실패 제한이 담당한다.
+ADMIN_URL = os.environ.get('DJANGO_ADMIN_URL', 'steamlens-admin').strip('/') + '/'
+
+if not DEBUG and not RUNNING_TESTS and 'DJANGO_ADMIN_URL' not in os.environ:
+    warnings.warn(
+        'DJANGO_ADMIN_URL이 기본값입니다. 공개 저장소에 적힌 값이므로 운영에서는 바꾸세요.',
+        RuntimeWarning,
+    )
 
 
 # Application definition
@@ -153,6 +227,13 @@ AUTH_PASSWORD_VALIDATORS = [
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
     },
 ]
+
+
+# 테스트에서만 빠른 해셔를 쓴다. 운영 해셔(PBKDF2)는 의도적으로 느리게 설계되어
+# 로그인 시도가 많은 테스트(관리자 로그인 제한)가 수십 초씩 걸린다.
+# RUNNING_TESTS일 때만 적용되므로 실제 비밀번호 저장 방식에는 영향이 없다.
+if RUNNING_TESTS:
+    PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 
 
 # Internationalization
@@ -242,6 +323,30 @@ RECOMMENDER = {
     'ENRICH_WORKERS': int(os.environ.get('ENRICH_WORKERS', 6)),     # 외부 API 병렬 호출 수
     'TRANSLATE': env_bool('TRANSLATE', True),
 }
+
+# -----------------------------------------------------------------------------
+# 요청 제한 (rate limit)
+# -----------------------------------------------------------------------------
+# 검색 1회는 임베딩 전수 내적, 매칭 실패 시에는 게임명 전체에 대한 difflib
+# 비교까지 수행한다. 제한이 없으면 비인증 사용자가 존재하지 않는 검색어를
+# 반복 전송하는 것만으로 CPU를 고갈시킬 수 있었다.
+# 클릭 로그도 비인증 GET 한 번에 DB row가 하나씩 생겨 CTR 지표 오염과
+# DB 팽창이 가능했다.
+#
+# 형식: "횟수/기간". 기간은 s, m, h, d 단위이며 '15m'처럼 숫자를 붙일 수 있다.
+# 주의: 카운터는 캐시에 저장된다. 기본 LocMemCache는 프로세스마다 따로라서
+#       워커가 N개면 실제 한도가 N배가 된다. 운영에서는 REDIS_URL을 지정하세요.
+RATE_LIMITS = {
+    'ENABLED': env_bool('RATE_LIMIT_ENABLED', True),
+    'SEARCH': os.environ.get('RATE_LIMIT_SEARCH', '30/m'),        # IP당
+    'CLICK': os.environ.get('RATE_LIMIT_CLICK', '60/m'),          # IP당 (초과분은 기록만 생략)
+    'DASHBOARD': os.environ.get('RATE_LIMIT_DASHBOARD', '10/m'),  # 사용자당 (Steam API 쿼터 보호)
+    # 관리자 로그인 '실패' 횟수. IP 기준과 사용자명 기준을 각각 센다.
+    'ADMIN_LOGIN_FAILURES': os.environ.get('RATE_LIMIT_ADMIN_LOGIN', '5/15m'),
+}
+
+# 검색어 최대 길이. 긴 문자열은 difflib 비용을 키우는 것 외에 쓸모가 없다.
+MAX_QUERY_LENGTH = int(os.environ.get('MAX_QUERY_LENGTH', 100))
 
 # -----------------------------------------------------------------------------
 # 로깅

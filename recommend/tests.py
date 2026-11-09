@@ -518,3 +518,239 @@ class ViewTests(FakeCatalogMixin, TestCase):
         })
         self.assertEqual(response.status_code, 302)
         self.assertNotIn('evil.example.com', response['Location'])
+
+
+# =============================================================================
+# 보안 강화 — 비밀키 / 요청 제한 / 클릭 로그 / 관리자 로그인
+# =============================================================================
+from django.contrib.auth import get_user_model
+from django.core.exceptions import ImproperlyConfigured
+from django.test import RequestFactory, override_settings
+
+from steamlens import settings as project_settings
+
+from . import ratelimit
+
+
+class SecretKeyResolutionTests(SimpleTestCase):
+    """settings.resolve_secret_key 규칙.
+
+    이전 버전은 임시 키 허용 기본값이 True라 운영에서 키를 빠뜨려도 부팅됐다.
+    """
+
+    STRONG = 'x' * 60
+
+    def test_uses_given_key(self):
+        key, ephemeral = project_settings.resolve_secret_key(
+            self.STRONG, debug=False, allow_ephemeral=False)
+        self.assertEqual(key, self.STRONG)
+        self.assertFalse(ephemeral)
+
+    def test_production_without_key_refuses_to_boot(self):
+        with self.assertRaises(ImproperlyConfigured):
+            project_settings.resolve_secret_key(None, debug=False, allow_ephemeral=False)
+
+    def test_debug_without_key_gets_ephemeral(self):
+        key, ephemeral = project_settings.resolve_secret_key(
+            None, debug=True, allow_ephemeral=False)
+        self.assertTrue(ephemeral)
+        self.assertGreaterEqual(len(key), 50)
+
+    def test_ephemeral_keys_differ(self):
+        a, _ = project_settings.resolve_secret_key(None, debug=True, allow_ephemeral=False)
+        b, _ = project_settings.resolve_secret_key(None, debug=True, allow_ephemeral=False)
+        self.assertNotEqual(a, b)
+
+    def test_production_rejects_short_key(self):
+        with self.assertRaises(ImproperlyConfigured):
+            project_settings.resolve_secret_key('short', debug=False, allow_ephemeral=False)
+
+    def test_production_rejects_django_insecure_prefix(self):
+        """이 저장소의 예전 키도 이 형태로 공개 히스토리에 남아 있다."""
+        with self.assertRaises(ImproperlyConfigured):
+            project_settings.resolve_secret_key(
+                'django-insecure-' + 'a' * 60, debug=False, allow_ephemeral=False)
+
+    def test_debug_accepts_weak_key(self):
+        key, _ = project_settings.resolve_secret_key('short', debug=True, allow_ephemeral=False)
+        self.assertEqual(key, 'short')
+
+
+class ParseRateTests(SimpleTestCase):
+    def test_simple_units(self):
+        self.assertEqual(ratelimit.parse_rate('30/m'), (30, 60))
+        self.assertEqual(ratelimit.parse_rate('10/s'), (10, 1))
+        self.assertEqual(ratelimit.parse_rate('100/h'), (100, 3600))
+        self.assertEqual(ratelimit.parse_rate('1000/d'), (1000, 86400))
+
+    def test_multiplied_window(self):
+        self.assertEqual(ratelimit.parse_rate('5/15m'), (5, 900))
+
+    def test_invalid(self):
+        for bad in ('', 'abc', '5', '5/x', '/m'):
+            with self.assertRaises(ValueError):
+                ratelimit.parse_rate(bad)
+
+
+class RateLimitCounterTests(SimpleTestCase):
+    def setUp(self):
+        cache.clear()
+
+    def test_allows_up_to_limit_then_blocks(self):
+        results = [ratelimit.hit('t', 'ip1', '3/m')[0] for _ in range(5)]
+        self.assertEqual(results, [False, False, False, True, True])
+
+    def test_identities_are_independent(self):
+        for _ in range(3):
+            ratelimit.hit('t', 'ip1', '3/m')
+        self.assertTrue(ratelimit.hit('t', 'ip1', '3/m')[0])
+        self.assertFalse(ratelimit.hit('t', 'ip2', '3/m')[0])
+
+    def test_new_window_resets(self):
+        with mock.patch('recommend.ratelimit.time.time', return_value=1000.0):
+            for _ in range(3):
+                ratelimit.hit('t', 'ip1', '3/m')
+            self.assertTrue(ratelimit.hit('t', 'ip1', '3/m')[0])
+        with mock.patch('recommend.ratelimit.time.time', return_value=1000.0 + 61):
+            self.assertFalse(ratelimit.hit('t', 'ip1', '3/m')[0])
+
+    @override_settings(RATE_LIMITS={'ENABLED': False, 'SEARCH': '1/m'})
+    def test_disabled(self):
+        request = RequestFactory().get('/')
+        for _ in range(5):
+            self.assertFalse(ratelimit.is_rate_limited(request, 'SEARCH'))
+
+
+class ClientIpTests(SimpleTestCase):
+    def test_ignores_forwarded_header_by_default(self):
+        """프록시 뒤가 아닌데 X-Forwarded-For를 믿으면 위조로 제한을 피할 수 있다."""
+        request = RequestFactory().get('/', REMOTE_ADDR='1.2.3.4',
+                                       HTTP_X_FORWARDED_FOR='9.9.9.9')
+        with self.settings(BEHIND_PROXY=False):
+            self.assertEqual(ratelimit.client_ip(request), '1.2.3.4')
+
+    def test_behind_proxy_uses_rightmost_hop(self):
+        """맨 왼쪽 값은 클라이언트가 위조할 수 있다. 우리 프록시가 붙인 맨 오른쪽을 쓴다."""
+        request = RequestFactory().get('/', REMOTE_ADDR='10.0.0.1',
+                                       HTTP_X_FORWARDED_FOR='6.6.6.6, 5.5.5.5')
+        with self.settings(BEHIND_PROXY=True):
+            self.assertEqual(ratelimit.client_ip(request), '5.5.5.5')
+
+
+class SuggestionCacheTests(FakeCatalogMixin, SimpleTestCase):
+    def test_result_is_cached(self):
+        first = services.suggest_titles(self.catalog, 'Soul Gaem A')
+        with mock.patch('recommend.services.difflib.get_close_matches') as mocked:
+            second = services.suggest_titles(self.catalog, 'Soul Gaem A')
+        mocked.assert_not_called()
+        self.assertEqual(first, second)
+
+    def test_query_is_truncated(self):
+        with self.settings(MAX_QUERY_LENGTH=5):
+            with mock.patch('recommend.services.difflib.get_close_matches',
+                            return_value=[]) as mocked:
+                services.suggest_titles(self.catalog, 'x' * 500)
+        self.assertEqual(len(mocked.call_args_list[0].args[0]), 5)
+
+
+class SearchRateLimitViewTests(FakeCatalogMixin, TestCase):
+    @override_settings(RATE_LIMITS={'ENABLED': True, 'SEARCH': '2/m'})
+    def test_search_returns_429_after_limit(self):
+        url = reverse('search')
+        self.assertEqual(self.client.get(url, {'q': 'Souls Game A'}).status_code, 200)
+        self.assertEqual(self.client.get(url, {'q': 'Souls Game A'}).status_code, 200)
+        response = self.client.get(url, {'q': 'Souls Game A'})
+        self.assertEqual(response.status_code, 429)
+        self.assertContains(response, '요청이 너무 많습니다', status_code=429)
+
+    @override_settings(RATE_LIMITS={'ENABLED': True, 'SEARCH': '1/m'})
+    def test_limited_requests_are_not_logged(self):
+        self.client.get(reverse('search'), {'q': 'Souls Game A'})
+        self.client.get(reverse('search'), {'q': 'Souls Game A'})
+        self.assertEqual(SearchLog.objects.count(), 1)
+
+    @override_settings(MAX_QUERY_LENGTH=10)
+    def test_overlong_query_rejected(self):
+        response = self.client.get(reverse('search'), {'q': 'x' * 11})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(SearchLog.objects.count(), 0)
+
+
+class ClickHardeningTests(FakeCatalogMixin, TestCase):
+    def test_game_name_comes_from_catalog_not_request(self):
+        """예전에는 요청의 name을 그대로 저장해 CTR 지표를 조작할 수 있었다."""
+        self.client.get(reverse('track_click'), {
+            'app_id': '1001', 'name': 'FAKE GAME', 'rank': '1',
+        })
+        self.assertEqual(RecommendationClick.objects.get().game_name, 'Souls Game A')
+
+    def test_unknown_app_id_not_logged_but_still_redirects(self):
+        response = self.client.get(reverse('track_click'), {'app_id': '999999'})
+        self.assertEqual(response.status_code, 302)
+        self.assertIn('/app/999999/', response['Location'])
+        self.assertEqual(RecommendationClick.objects.count(), 0)
+
+    def test_out_of_range_rank_is_zeroed(self):
+        self.client.get(reverse('track_click'), {'app_id': '1001', 'rank': '9999'})
+        self.assertEqual(RecommendationClick.objects.get().rank, 0)
+
+    def test_invalid_source_is_normalised(self):
+        self.client.get(reverse('track_click'), {'app_id': '1001', 'source': '<script>'})
+        self.assertEqual(RecommendationClick.objects.get().source, SearchLog.SOURCE_SEARCH)
+
+    @override_settings(RATE_LIMITS={'ENABLED': True, 'CLICK': '2/m'})
+    def test_click_limit_skips_logging_but_redirects(self):
+        for _ in range(4):
+            response = self.client.get(reverse('track_click'), {'app_id': '1001'})
+            self.assertEqual(response.status_code, 302)
+        self.assertEqual(RecommendationClick.objects.count(), 2)
+
+
+class AdminLoginThrottleTests(TestCase):
+    PASSWORD = 'correct-horse-battery-staple'
+
+    def setUp(self):
+        cache.clear()
+        self.user = get_user_model().objects.create_user(
+            'boss', password=self.PASSWORD, is_staff=True, is_superuser=True)
+        self.url = reverse('admin:login')
+
+    def _post(self, password, username='boss', ip='1.1.1.1'):
+        return self.client.post(self.url, {'username': username, 'password': password},
+                                REMOTE_ADDR=ip)
+
+    def test_admin_is_not_at_default_path(self):
+        self.assertFalse(self.url.startswith('/admin/'))
+
+    @override_settings(RATE_LIMITS={'ENABLED': True, 'ADMIN_LOGIN_FAILURES': '3/15m'})
+    def test_blocks_after_failures(self):
+        for _ in range(3):
+            self.assertEqual(self._post('wrong').status_code, 200)
+        self.assertEqual(self._post('wrong').status_code, 429)
+
+    @override_settings(RATE_LIMITS={'ENABLED': True, 'ADMIN_LOGIN_FAILURES': '3/15m'})
+    def test_correct_password_rejected_while_locked(self):
+        """잠금 중에도 맞는 비밀번호를 받아 주면 대입 공격 차단이 무의미해진다."""
+        for _ in range(3):
+            self._post('wrong')
+        self.assertEqual(self._post(self.PASSWORD).status_code, 429)
+
+    @override_settings(RATE_LIMITS={'ENABLED': True, 'ADMIN_LOGIN_FAILURES': '3/15m'})
+    def test_successful_login_not_counted(self):
+        for _ in range(5):
+            self.client.logout()
+            self.assertEqual(self._post(self.PASSWORD).status_code, 302)
+
+    @override_settings(RATE_LIMITS={'ENABLED': True, 'ADMIN_LOGIN_FAILURES': '3/15m'})
+    def test_distributed_attack_on_one_account_blocked(self):
+        """IP를 바꿔 가며 한 계정을 노려도 사용자명 기준으로 막힌다."""
+        for i in range(3):
+            self._post('wrong', ip=f'2.2.2.{i}')
+        self.assertEqual(self._post('wrong', ip='3.3.3.3').status_code, 429)
+
+    @override_settings(RATE_LIMITS={'ENABLED': True, 'ADMIN_LOGIN_FAILURES': '3/15m'})
+    def test_one_ip_spraying_accounts_blocked(self):
+        """한 IP가 계정을 바꿔 가며 시도해도 IP 기준으로 막힌다."""
+        for i in range(3):
+            self._post('wrong', username=f'user{i}')
+        self.assertEqual(self._post('wrong', username='other').status_code, 429)

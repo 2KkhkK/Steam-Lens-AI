@@ -72,11 +72,15 @@ copy .env.example .env
 
 <sub>macOS / Linux: `cp .env.example .env`</sub>
 
-`.env`를 열어 값을 채웁니다. **전부 비워 둬도 검색 추천은 동작합니다.**
+`.env`를 열어 값을 채웁니다. `.env.example`은 `DJANGO_DEBUG=True`(로컬 개발)로 되어 있어
+**복사만 하고 나머지를 비워 둬도 검색 추천은 동작합니다.**
+
+> `.env` 없이 실행하면 `DEBUG`가 기본값 `False`(운영 모드)가 되고, 비밀키가 없으므로
+> **서버가 부팅을 거부합니다.** 운영에서 키를 빠뜨린 채 조용히 뜨는 사고를 막기 위한 의도된 동작입니다.
 
 | 변수 | 없으면 | 발급처 |
 |---|---|---|
-| `DJANGO_SECRET_KEY` | 실행마다 임시 키 생성 (재시작 시 세션 초기화) | `python -c "import secrets; print(secrets.token_urlsafe(50))"` |
+| `DJANGO_SECRET_KEY` | DEBUG=True면 실행마다 임시 키 생성 / **DEBUG=False면 부팅 거부** | `python -c "import secrets; print(secrets.token_urlsafe(50))"` |
 | `STEAM_API_KEY` | 스팀 로그인/대시보드 기능만 비활성 | [steamcommunity.com/dev/apikey](https://steamcommunity.com/dev/apikey) |
 | `ITAD_API_KEY` | `mock_lowest_price.json`으로 자동 대체 | [isthereanydeal.com/apps/my](https://isthereanydeal.com/apps/my/) |
 
@@ -239,16 +243,41 @@ python bulk_evaluate.py --grid
 
 ---
 
-## 배포 시 체크리스트
+## 보안
+
+### 기본값이 안전한 쪽으로 설정되어 있습니다
+
+| 항목 | 동작 |
+|---|---|
+| `DEBUG` | 기본 `False`. 켜려면 명시적으로 `DJANGO_DEBUG=True` |
+| `SECRET_KEY` | 운영에서 없거나 약하면(50자 미만, `django-insecure-` 접두사) **부팅 거부** |
+| HTTPS | `DEBUG=False`이면 SSL 리다이렉트·보안 쿠키·HSTS가 **자동으로** 켜짐 |
+| 관리자 | 경로 `/steamlens-admin/`(변경 가능), **로그인 실패 5회/15분 시 차단**(IP·사용자명 각각) |
+| 요청 제한 | 검색 30회/분(IP), 클릭 기록 60회/분(IP), 대시보드 10회/분(사용자) |
+| 클릭 로그 | 게임명은 요청이 아니라 카탈로그에서 가져옴. 존재하지 않는 게임은 기록 안 함 |
+| 검색어 | 최대 100자. 오타 교정 결과는 캐싱 |
+
+요청 제한 카운터는 Django 캐시에 저장됩니다. 기본 `LocMemCache`는 프로세스마다 따로라서
+**워커가 N개면 실제 한도도 N배**가 됩니다. 운영에서는 `REDIS_URL`을 지정하세요.
+
+### 배포 체크리스트
 
 ```bash
 python manage.py check --deploy
 ```
 
-`.env`에서 `DJANGO_DEBUG=False`, `DJANGO_SECRET_KEY` 지정, `DJANGO_ALLOWED_HOSTS`를
-실제 도메인으로, HTTPS 환경이면 `DJANGO_SECURE_SSL=True`(HSTS·보안 쿠키·SSL 리다이렉트 활성화).
-워커를 여러 개 띄운다면 `REDIS_URL`을 반드시 지정하세요 —
-기본 `LocMemCache`는 프로세스 로컬이라 워커 간 캐시가 공유되지 않습니다.
+1. `DJANGO_DEBUG=False`(또는 줄 삭제), `DJANGO_SECRET_KEY`에 새로 발급한 키
+2. `DJANGO_ALLOWED_HOSTS`를 실제 도메인으로
+3. `DJANGO_ADMIN_URL`을 저장소에 적히지 않은 값으로
+4. nginx/로드밸런서 뒤라면 `DJANGO_BEHIND_PROXY=True`, 필요 시 `DJANGO_CSRF_TRUSTED_ORIGINS`
+5. 워커가 여럿이면 `REDIS_URL` (캐시와 요청 제한 공유)
+6. HTTPS 정상 동작을 확인한 뒤 `DJANGO_HSTS_SECONDS`를 `31536000`으로 상향
+
+### 알려진 사항
+
+- 과거 커밋 히스토리에 **개발용 SECRET_KEY**와 **ITAD API 키**가 남아 있습니다.
+  두 값 모두 **폐기되었으며 현재 코드에서 사용하지 않습니다.** 재사용하지 마세요.
+- 관리자 2단계 인증(2FA)은 아직 없습니다.
 
 ---
 

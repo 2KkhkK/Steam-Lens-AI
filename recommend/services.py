@@ -70,6 +70,11 @@ class Catalog:
         self.source_path = source_path
         self.names = df['Name'].astype(str).tolist()
         self.lower_names = [n.lower() for n in self.names]
+        # 오타 교정 2차 탐색에서 소문자 결과를 원래 표기로 되돌릴 때 쓴다.
+        # 예전에는 list.index()로 매번 9만 건을 다시 훑었다(O(N) x 후보 수).
+        self.lower_to_name = {}
+        for name, lower in zip(self.names, self.lower_names):
+            self.lower_to_name.setdefault(lower, name)
         # App_ID -> 행 인덱스. 대시보드에서 보유 게임을 찾을 때 O(1)로 조회한다.
         self.appid_to_index = {}
         for pos, app_id in enumerate(df['App_ID'].tolist()):
@@ -334,14 +339,43 @@ def find_game_index(catalog, query):
         return best, []
 
     # 3) 오타 교정 제안
-    #    index.html에는 예전부터 'suggestions'를 표시하는 코드가 있었지만
-    #    뷰에서 값을 넘겨주지 않아 동작하지 않는 죽은 코드였다.
+    return None, suggest_titles(catalog, query)
+
+
+def suggest_titles(catalog, query):
+    """오타 교정 후보.
+
+    이 함수는 검색 경로에서 가장 비싸다. difflib가 게임명 9만 개를 순회하며
+    문자열 유사도를 계산하기 때문이다. 그리고 '존재하지 않는 검색어'일 때만
+    실행되므로, 공격자가 무작위 문자열을 반복 전송하면 매번 이 경로를 탄다.
+
+    방어는 세 겹이다.
+      1. 뷰의 요청 제한(RATE_LIMITS['SEARCH'])
+      2. 검색어 길이 상한(MAX_QUERY_LENGTH) - 비교 비용이 길이에 비례한다
+      3. 같은 검색어의 결과 캐싱 - 같은 오타를 반복해도 계산은 한 번
+    참고: difflib.get_close_matches는 내부에서 길이 기반 상한(real_quick_ratio)으로
+    후보를 먼저 걸러 내므로, 길이 필터를 별도로 덧붙이는 것은 효과가 없다.
+    """
+    max_len = getattr(settings, 'MAX_QUERY_LENGTH', 100)
+    query = (query or '').strip()[:max_len]
+    if not query:
+        return []
+
+    lowered = query.lower()
+    key = cache_key('suggest', lowered)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
     matches = difflib.get_close_matches(query, catalog.names, n=5, cutoff=0.6)
     if not matches:
-        matches = difflib.get_close_matches(lowered, catalog.lower_names, n=5, cutoff=0.5)
-        matches = [catalog.names[catalog.lower_names.index(m)] for m in matches]
+        lowered_matches = difflib.get_close_matches(
+            lowered, catalog.lower_names, n=5, cutoff=0.5
+        )
+        matches = [catalog.lower_to_name[m] for m in lowered_matches]
 
-    return None, matches
+    cache.set(key, matches, 3600)
+    return matches
 
 
 # -----------------------------------------------------------------------------
