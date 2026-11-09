@@ -135,6 +135,20 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = 'same-origin'
 X_FRAME_OPTIONS = 'DENY'
 
+# -----------------------------------------------------------------------------
+# 관리자 페이지
+# -----------------------------------------------------------------------------
+# 기본 경로 'admin/'은 자동화된 스캐너가 가장 먼저 두드리는 주소다. 경로 변경은
+# 그 자체로 보안 장치가 아니며(공개 저장소의 기본값은 누구나 안다) 소음을 줄이는
+# 수단이다. 실제 방어는 아래 RATE_LIMITS의 로그인 실패 제한이 담당한다.
+ADMIN_URL = os.environ.get('DJANGO_ADMIN_URL', 'steamlens-admin').strip('/') + '/'
+
+if not DEBUG and not RUNNING_TESTS and 'DJANGO_ADMIN_URL' not in os.environ:
+    warnings.warn(
+        'DJANGO_ADMIN_URL이 기본값입니다. 공개 저장소에 적힌 값이므로 운영에서는 바꾸세요.',
+        RuntimeWarning,
+    )
+
 
 # Application definition
 
@@ -309,6 +323,30 @@ RECOMMENDER = {
     'ENRICH_WORKERS': int(os.environ.get('ENRICH_WORKERS', 6)),     # 외부 API 병렬 호출 수
     'TRANSLATE': env_bool('TRANSLATE', True),
 }
+
+# -----------------------------------------------------------------------------
+# 요청 제한 (rate limit)
+# -----------------------------------------------------------------------------
+# 검색 1회는 임베딩 전수 내적, 매칭 실패 시에는 게임명 전체에 대한 difflib
+# 비교까지 수행한다. 제한이 없으면 비인증 사용자가 존재하지 않는 검색어를
+# 반복 전송하는 것만으로 CPU를 고갈시킬 수 있었다.
+# 클릭 로그도 비인증 GET 한 번에 DB row가 하나씩 생겨 CTR 지표 오염과
+# DB 팽창이 가능했다.
+#
+# 형식: "횟수/기간". 기간은 s, m, h, d 단위이며 '15m'처럼 숫자를 붙일 수 있다.
+# 주의: 카운터는 캐시에 저장된다. 기본 LocMemCache는 프로세스마다 따로라서
+#       워커가 N개면 실제 한도가 N배가 된다. 운영에서는 REDIS_URL을 지정하세요.
+RATE_LIMITS = {
+    'ENABLED': env_bool('RATE_LIMIT_ENABLED', True),
+    'SEARCH': os.environ.get('RATE_LIMIT_SEARCH', '30/m'),        # IP당
+    'CLICK': os.environ.get('RATE_LIMIT_CLICK', '60/m'),          # IP당 (초과분은 기록만 생략)
+    'DASHBOARD': os.environ.get('RATE_LIMIT_DASHBOARD', '10/m'),  # 사용자당 (Steam API 쿼터 보호)
+    # 관리자 로그인 '실패' 횟수. IP 기준과 사용자명 기준을 각각 센다.
+    'ADMIN_LOGIN_FAILURES': os.environ.get('RATE_LIMIT_ADMIN_LOGIN', '5/15m'),
+}
+
+# 검색어 최대 길이. 긴 문자열은 difflib 비용을 키우는 것 외에 쓸모가 없다.
+MAX_QUERY_LENGTH = int(os.environ.get('MAX_QUERY_LENGTH', 100))
 
 # -----------------------------------------------------------------------------
 # 로깅
